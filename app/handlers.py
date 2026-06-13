@@ -4,10 +4,11 @@ import logging
 from dataclasses import dataclass, field
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, ErrorEvent, Message
 
+from app.error_reporting import notify_admin_about_error
 from app.formatters import format_options, format_recipe
 from app.keyboards import options_keyboard, recipe_keyboard
 from app.models import DishOption, Recipe
@@ -37,6 +38,13 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 AI_ERROR_TEXT = "Сейчас не получилось получить ответ от AI. Попробуй позже."
+
+
+@router.error()
+async def error_handler(event: ErrorEvent, bot: Bot) -> None:
+    error = event.exception
+    logger.error("Unhandled bot error", exc_info=(type(error), error, error.__traceback__))
+    await notify_admin_about_error(bot, "Unhandled bot error", error, event=event)
 
 
 @dataclass(slots=True)
@@ -242,8 +250,14 @@ async def generate_and_send_options(
     thinking_message = await message.answer("Думаю над 3 быстрыми вариантами...")
     try:
         options = await gigachat.generate_options(text, family_settings, excluded)
-    except Exception:
+    except Exception as error:
         logger.exception("Failed to generate dish options with GigaChat")
+        await notify_admin_about_error(
+            getattr(message, "bot", None),
+            "Failed to generate dish options with GigaChat",
+            error,
+            event=message,
+        )
         await thinking_message.edit_text(AI_ERROR_TEXT)
         return
 
@@ -281,8 +295,14 @@ async def pick_option(
     family_settings = await storage.get_family_settings(user_id)
     try:
         recipe = await gigachat.generate_recipe(session.last_query, option, family_settings)
-    except Exception:
+    except Exception as error:
         logger.exception("Failed to generate recipe with GigaChat")
+        await notify_admin_about_error(
+            getattr(message, "bot", None),
+            "Failed to generate recipe with GigaChat",
+            error,
+            event=message,
+        )
         await thinking_message.edit_text(AI_ERROR_TEXT)
         return
 
