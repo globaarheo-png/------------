@@ -90,6 +90,7 @@ class GigaChatClient:
 
     async def _chat_text(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
         if not self.settings.gigachat_auth_key:
+            logger.error("GIGACHAT_AUTH_KEY is not configured in environment variables")
             raise GigaChatError("GIGACHAT_AUTH_KEY is not configured")
 
         token = await self._access_token()
@@ -104,7 +105,7 @@ class GigaChatClient:
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json=request,
             )
-            response.raise_for_status()
+            self._raise_for_status(response, "GigaChat chat completion request")
             data = response.json()
 
         return str(data["choices"][0]["message"]["content"])
@@ -123,9 +124,23 @@ class GigaChatClient:
                 },
                 data={"scope": self.settings.gigachat_scope},
             )
-            response.raise_for_status()
+            self._raise_for_status(response, "GigaChat auth request")
             self._token = response.json()["access_token"]
             return self._token
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response, context: str) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                "%s failed: status=%s url=%s response_body=%r",
+                context,
+                response.status_code,
+                response.url,
+                response.text[:2000],
+            )
+            raise GigaChatError(f"{context} failed with HTTP {response.status_code}") from exc
 
     @classmethod
     def _parse_json(cls, content: str) -> dict[str, Any]:

@@ -89,8 +89,33 @@ def find_excluded_in_text(text: str, settings: FamilySettings) -> list[str]:
     return [item for item in excluded if item.lower() and item.lower() in lowered]
 
 
+def family_portions_text(settings: FamilySettings) -> str | None:
+    if settings.adults_count is not None and settings.children_count is not None:
+        return (
+            f"{settings.adults_count} {_plural(settings.adults_count, 'взрослый', 'взрослых', 'взрослых')} "
+            f"и {settings.children_count} {_plural(settings.children_count, 'ребенок', 'ребенка', 'детей')}"
+        )
+    if settings.people_count is not None:
+        return f"{settings.people_count} {_plural(settings.people_count, 'человек', 'человека', 'человек')}"
+    if settings.adults_count is not None:
+        return f"{settings.adults_count} {_plural(settings.adults_count, 'взрослый', 'взрослых', 'взрослых')}"
+    if settings.children_count is not None:
+        return f"{settings.children_count} {_plural(settings.children_count, 'ребенок', 'ребенка', 'детей')}"
+    return None
+
+
 def choose_simplest(options: list[DishOption]) -> DishOption:
     return sorted(options, key=lambda option: (option.simplicity_score, _minutes(option.time)))[0]
+
+
+def _plural(value: int, one: str, few: str, many: str) -> str:
+    if 11 <= value % 100 <= 14:
+        return many
+    if value % 10 == 1:
+        return one
+    if 2 <= value % 10 <= 4:
+        return few
+    return many
 
 
 def _minutes(text: str) -> int:

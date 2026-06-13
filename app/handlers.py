@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from html import escape
 
@@ -10,7 +11,7 @@ from aiogram.types import CallbackQuery, Message
 from app.formatters import format_options, format_recipe
 from app.keyboards import options_keyboard, recipe_keyboard
 from app.models import DishOption, Recipe
-from app.services.gigachat import GigaChatClient, GigaChatError
+from app.services.gigachat import GigaChatClient
 from app.storage.supabase_storage import SupabaseStorage
 from app.texts import (
     ASK_PRODUCTS_TEXT,
@@ -24,6 +25,7 @@ from app.texts import (
 )
 from app.utils import (
     choose_simplest,
+    family_portions_text,
     find_excluded_in_text,
     has_few_products,
     looks_like_food_request,
@@ -32,6 +34,9 @@ from app.utils import (
 
 
 router = Router()
+logger = logging.getLogger(__name__)
+
+AI_ERROR_TEXT = "Сейчас не получилось получить ответ от AI. Попробуй позже."
 
 
 @dataclass(slots=True)
@@ -237,12 +242,9 @@ async def generate_and_send_options(
     thinking_message = await message.answer("Думаю над 3 быстрыми вариантами...")
     try:
         options = await gigachat.generate_options(text, family_settings, excluded)
-    except (GigaChatError, Exception) as exc:
-        await thinking_message.edit_text(
-            "Не получилось получить варианты от GigaChat. "
-            "Проверь настройки API и попробуй еще раз.\n\n"
-            f"Технически: {escape(str(exc))}"
-        )
+    except Exception:
+        logger.exception("Failed to generate dish options with GigaChat")
+        await thinking_message.edit_text(AI_ERROR_TEXT)
         return
 
     request_id = await storage.create_food_request(user_id, text, options)
@@ -279,13 +281,14 @@ async def pick_option(
     family_settings = await storage.get_family_settings(user_id)
     try:
         recipe = await gigachat.generate_recipe(session.last_query, option, family_settings)
-    except (GigaChatError, Exception) as exc:
-        await thinking_message.edit_text(
-            "Не получилось получить рецепт от GigaChat. "
-            "Проверь настройки API и попробуй еще раз.\n\n"
-            f"Технически: {escape(str(exc))}"
-        )
+    except Exception:
+        logger.exception("Failed to generate recipe with GigaChat")
+        await thinking_message.edit_text(AI_ERROR_TEXT)
         return
+
+    portions_text = family_portions_text(family_settings)
+    if portions_text:
+        recipe.portions = portions_text
 
     session.current_recipe = recipe
     await storage.update_selected_recipe(session.current_request_id, option.number, recipe)
