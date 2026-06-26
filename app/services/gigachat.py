@@ -13,6 +13,7 @@ from app.models import DishOption, FamilySettings, Recipe
 
 
 logger = logging.getLogger(__name__)
+GIGACHAT_AUTH_KEY_ENV = "GIGACHAT_AUTH_KEY"
 
 
 class GigaChatError(RuntimeError):
@@ -26,6 +27,7 @@ class GigaChatClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._token: str | None = None
+        self._log_auth_key_check()
 
     async def generate_options(
         self,
@@ -90,8 +92,8 @@ class GigaChatClient:
 
     async def _chat_text(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
         if not self.settings.gigachat_auth_key:
-            logger.error("GIGACHAT_AUTH_KEY is not configured in environment variables")
-            raise GigaChatError("GIGACHAT_AUTH_KEY is not configured")
+            logger.error("%s is not configured in environment variables", GIGACHAT_AUTH_KEY_ENV)
+            raise GigaChatError("GigaChat credentials are not configured")
 
         token = await self._access_token()
         request = {
@@ -118,7 +120,7 @@ class GigaChatClient:
             response = await client.post(
                 self.auth_url,
                 headers={
-                    "Authorization": f"Basic {self.settings.gigachat_auth_key}",
+                    "Authorization": self._authorization_header(self.settings.gigachat_auth_key),
                     "RqUID": str(uuid.uuid4()),
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
@@ -133,6 +135,18 @@ class GigaChatClient:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if context == "GigaChat auth request" and response.status_code == 401:
+                logger.exception(
+                    "%s rejected Authorization Key: status=%s url=%s. "
+                    "Check %s in .env; it must be the GigaChat Authorization Key, "
+                    "not an access token.",
+                    context,
+                    response.status_code,
+                    response.url,
+                    GIGACHAT_AUTH_KEY_ENV,
+                )
+                raise GigaChatError("GigaChat authorization failed") from exc
+
             logger.exception(
                 "%s failed: status=%s url=%s response_body=%r",
                 context,
@@ -141,6 +155,23 @@ class GigaChatClient:
                 response.text[:2000],
             )
             raise GigaChatError(f"{context} failed with HTTP {response.status_code}") from exc
+
+    def _log_auth_key_check(self) -> None:
+        auth_key = self.settings.gigachat_auth_key.strip()
+        logger.info(
+            "GigaChat auth config: variable=%s found=%s length_gt_20=%s scope=%s",
+            GIGACHAT_AUTH_KEY_ENV,
+            bool(auth_key),
+            len(auth_key) > 20,
+            self.settings.gigachat_scope,
+        )
+
+    @staticmethod
+    def _authorization_header(auth_key: str) -> str:
+        auth_key = auth_key.strip()
+        if auth_key.lower().startswith("basic "):
+            return auth_key
+        return f"Basic {auth_key}"
 
     @classmethod
     def _parse_json(cls, content: str) -> dict[str, Any]:

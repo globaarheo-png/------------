@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from html import escape
+from typing import Any, Awaitable, Callable
 
-from aiogram import Bot, F, Router
+from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, ErrorEvent, Message
+from aiogram.types import CallbackQuery, ErrorEvent, Message, TelegramObject
 
 from app.error_reporting import notify_admin_about_error
 from app.formatters import format_options, format_recipe
@@ -37,7 +38,42 @@ from app.utils import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-AI_ERROR_TEXT = "Сейчас не получилось получить ответ от AI. Попробуй позже."
+USER_ERROR_TEXT = "Сейчас не могу ответить, попробуйте позже"
+
+
+class ErrorHandlingMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        try:
+            return await handler(event, data)
+        except Exception as error:
+            logger.exception("Unhandled bot handler error")
+            await notify_admin_about_error(
+                data.get("bot") or getattr(event, "bot", None),
+                "Unhandled bot handler error",
+                error,
+                event=event,
+            )
+            await answer_user_about_error(event)
+            return None
+
+
+async def answer_user_about_error(event: TelegramObject) -> None:
+    try:
+        if isinstance(event, Message):
+            await event.answer(USER_ERROR_TEXT)
+        elif isinstance(event, CallbackQuery):
+            await event.answer(USER_ERROR_TEXT, show_alert=True)
+    except Exception:
+        logger.exception("Failed to send error message to user")
+
+
+router.message.middleware(ErrorHandlingMiddleware())
+router.callback_query.middleware(ErrorHandlingMiddleware())
 
 
 @router.error()
@@ -45,6 +81,7 @@ async def error_handler(event: ErrorEvent, bot: Bot) -> None:
     error = event.exception
     logger.error("Unhandled bot error", exc_info=(type(error), error, error.__traceback__))
     await notify_admin_about_error(bot, "Unhandled bot error", error, event=event)
+    await answer_user_about_error(event.update.event)
 
 
 @dataclass(slots=True)
@@ -258,7 +295,7 @@ async def generate_and_send_options(
             error,
             event=message,
         )
-        await thinking_message.edit_text(AI_ERROR_TEXT)
+        await thinking_message.edit_text(USER_ERROR_TEXT)
         return
 
     request_id = await storage.create_food_request(user_id, text, options)
@@ -303,7 +340,7 @@ async def pick_option(
             error,
             event=message,
         )
-        await thinking_message.edit_text(AI_ERROR_TEXT)
+        await thinking_message.edit_text(USER_ERROR_TEXT)
         return
 
     portions_text = family_portions_text(family_settings)

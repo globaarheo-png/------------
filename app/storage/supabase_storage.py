@@ -13,6 +13,11 @@ try:
 except ImportError:  # pragma: no cover - postgrest is installed with supabase
     APIError = None  # type: ignore[assignment]
 
+try:
+    from httpx import TransportError
+except ImportError:  # pragma: no cover - httpx is installed with supabase
+    TransportError = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from supabase import Client
 
@@ -197,6 +202,14 @@ class SupabaseStorage:
                 )
                 self.client = None
                 return None
+            if self._is_connection_error(error):
+                logger.warning(
+                    "Supabase is unavailable (%s). Persistent storage is disabled "
+                    "for this run.",
+                    error,
+                )
+                self.client = None
+                return None
             raise
 
     @staticmethod
@@ -204,6 +217,12 @@ class SupabaseStorage:
         if APIError is not None and not isinstance(error, APIError):
             return False
         return "PGRST205" in str(error)
+
+    @staticmethod
+    def _is_connection_error(error: Exception) -> bool:
+        if TransportError is not None and isinstance(error, TransportError):
+            return True
+        return isinstance(error, OSError)
 
     @staticmethod
     def recipe_to_text(recipe: Recipe) -> str:
