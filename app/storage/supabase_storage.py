@@ -142,10 +142,10 @@ class SupabaseStorage:
             .eq("id", request_id)
         )
 
-    async def add_favorite(self, user_id: int, request_id: int | None, recipe: Recipe) -> None:
+    async def add_favorite(self, user_id: int, request_id: int | None, recipe: Recipe) -> bool:
         if not self.client:
-            return
-        self._execute(
+            return False
+        response = self._execute(
             self.client.table("favorites").insert(
                 {
                     "user_id": user_id,
@@ -156,12 +156,15 @@ class SupabaseStorage:
                 }
             )
         )
+        if response is None:
+            return False
         if request_id is not None:
             self._execute(
                 self.client.table("food_requests")
                 .update({"status": "favorite_added", "updated_at": self._now()})
                 .eq("id", request_id)
             )
+        return True
 
     async def list_favorites(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
         if not self.client:

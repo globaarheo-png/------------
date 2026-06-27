@@ -197,7 +197,11 @@ async def favorite_callback(callback: CallbackQuery, storage: SupabaseStorage) -
     if not session.current_recipe:
         await callback.answer(NO_RECIPE_TO_SAVE_TEXT, show_alert=True)
         return
-    await storage.add_favorite(user_id, session.current_request_id, session.current_recipe)
+    await storage.upsert_user(user_id, callback.from_user.full_name or callback.from_user.username)
+    is_saved = await storage.add_favorite(user_id, session.current_request_id, session.current_recipe)
+    if not is_saved:
+        await callback.answer("Не смогла сохранить: избранное сейчас недоступно", show_alert=True)
+        return
     await callback.answer("Сохранила в избранное")
 
 
@@ -267,6 +271,10 @@ async def send_again(
 
 
 async def send_favorites(message: Message, user_id: int, storage: SupabaseStorage) -> None:
+    if not storage.enabled:
+        await message.answer("Избранное сейчас недоступно, попробуйте позже.")
+        return
+
     favorites = await storage.list_favorites(user_id)
     if not favorites:
         await message.answer("В избранном пока пусто.")
