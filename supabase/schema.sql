@@ -21,6 +21,9 @@ alter table public.family_settings
 alter table public.family_settings
   add column if not exists children_count integer;
 
+alter table public.family_settings
+  add column if not exists child_ages jsonb not null default '[]'::jsonb;
+
 create table if not exists public.food_requests (
   id bigserial primary key,
   user_id bigint not null references public.users(id) on delete cascade,

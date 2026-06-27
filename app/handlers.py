@@ -190,17 +190,28 @@ async def new_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "favorite:add")
+@router.callback_query(F.data.startswith("favorite:add"))
 async def favorite_callback(callback: CallbackQuery, storage: SupabaseStorage) -> None:
     user_id = callback.from_user.id
     session = session_for(user_id)
-    if not session.current_recipe:
-        await callback.answer(NO_RECIPE_TO_SAVE_TEXT, show_alert=True)
-        return
     await storage.upsert_user(user_id, callback.from_user.full_name or callback.from_user.username)
-    is_saved = await storage.add_favorite(user_id, session.current_request_id, session.current_recipe)
+    request_id = favorite_request_id(callback.data)
+    if session.current_recipe and (
+        request_id is None or request_id == session.current_request_id
+    ):
+        is_saved = await storage.add_favorite(
+            user_id,
+            request_id if request_id is not None else session.current_request_id,
+            session.current_recipe,
+        )
+    else:
+        is_saved = await storage.add_favorite_from_request(user_id, request_id)
+
     if not is_saved:
-        await callback.answer("Не смогла сохранить: избранное сейчас недоступно", show_alert=True)
+        if storage.enabled:
+            await callback.answer(NO_RECIPE_TO_SAVE_TEXT, show_alert=True)
+        else:
+            await callback.answer("Не смогла сохранить: избранное сейчас недоступно", show_alert=True)
         return
     await callback.answer("Сохранила в избранное")
 
@@ -220,6 +231,18 @@ async def pick_callback(callback: CallbackQuery, storage: SupabaseStorage, gigac
     value = (callback.data or "").split(":", 1)[1]
     await pick_option(callback.message, callback.from_user.id, value, storage, gigachat)
     await callback.answer()
+
+
+def favorite_request_id(callback_data: str | None) -> int | None:
+    if not callback_data:
+        return None
+    parts = callback_data.split(":", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
 
 
 @router.message(F.text)
@@ -271,10 +294,6 @@ async def send_again(
 
 
 async def send_favorites(message: Message, user_id: int, storage: SupabaseStorage) -> None:
-    if not storage.enabled:
-        await message.answer("Избранное сейчас недоступно, попробуйте позже.")
-        return
-
     favorites = await storage.list_favorites(user_id)
     if not favorites:
         await message.answer("В избранном пока пусто.")
@@ -370,5 +389,5 @@ async def pick_option(
     await storage.update_selected_recipe(session.current_request_id, option.number, recipe)
     await thinking_message.edit_text(
         f"{format_recipe(recipe)}\n\n<i>{escape(MEDICAL_NOTE)}</i>",
-        reply_markup=recipe_keyboard(),
+        reply_markup=recipe_keyboard(session.current_request_id),
     )

@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.config import Settings
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 class SupabaseStorage:
     def __init__(self, settings: Settings) -> None:
         self.client: Client | None = None
+        self.local_favorites_path = Path("data") / "favorites.json"
         if settings.supabase_url and settings.supabase_key:
             try:
                 from supabase import create_client
@@ -144,7 +147,7 @@ class SupabaseStorage:
 
     async def add_favorite(self, user_id: int, request_id: int | None, recipe: Recipe) -> bool:
         if not self.client:
-            return False
+            return self._add_local_favorite(user_id, request_id, recipe.title, self.recipe_to_text(recipe), recipe.child_note)
         response = self._execute(
             self.client.table("favorites").insert(
                 {
@@ -157,7 +160,7 @@ class SupabaseStorage:
             )
         )
         if response is None:
-            return False
+            return self._add_local_favorite(user_id, request_id, recipe.title, self.recipe_to_text(recipe), recipe.child_note)
         if request_id is not None:
             self._execute(
                 self.client.table("food_requests")
@@ -166,9 +169,57 @@ class SupabaseStorage:
             )
         return True
 
+    async def add_favorite_from_request(self, user_id: int, request_id: int | None) -> bool:
+        if not self.client:
+            return False
+
+        query = (
+            self.client.table("food_requests")
+            .select("id, selected_recipe_text, child_note")
+            .eq("user_id", user_id)
+            .not_.is_("selected_recipe_text", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+        )
+        if request_id is not None:
+            query = query.eq("id", request_id)
+
+        response = self._execute(query)
+        if response is None:
+            return False
+        rows = response.data or []
+        if not rows:
+            return False
+
+        request = rows[0]
+        recipe_text = (request.get("selected_recipe_text") or "").strip()
+        if not recipe_text:
+            return False
+
+        response = self._execute(
+            self.client.table("favorites").insert(
+                {
+                    "user_id": user_id,
+                    "food_request_id": request.get("id"),
+                    "title": recipe_text.splitlines()[0][:120] or "Рецепт",
+                    "recipe": recipe_text,
+                    "child_note": request.get("child_note"),
+                }
+            )
+        )
+        if response is None:
+            return False
+
+        self._execute(
+            self.client.table("food_requests")
+            .update({"status": "favorite_added", "updated_at": self._now()})
+            .eq("id", request.get("id"))
+        )
+        return True
+
     async def list_favorites(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
         if not self.client:
-            return []
+            return self._list_local_favorites(user_id, limit)
         response = self._execute(
             self.client.table("favorites")
             .select("title, recipe, child_note, created_at")
@@ -177,8 +228,14 @@ class SupabaseStorage:
             .limit(limit)
         )
         if response is None:
-            return []
-        return response.data or []
+            return self._list_local_favorites(user_id, limit)
+        local_favorites = self._list_local_favorites(user_id, limit)
+        favorites = (response.data or []) + local_favorites
+        return sorted(
+            favorites,
+            key=lambda item: item.get("created_at") or "",
+            reverse=True,
+        )[:limit]
 
     async def list_history(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
         if not self.client:
@@ -213,19 +270,85 @@ class SupabaseStorage:
                 )
                 self.client = None
                 return None
+            if self._is_api_error(error):
+                logger.warning(
+                    "Supabase API request failed (%s). Falling back to local storage "
+                    "for this run.",
+                    error,
+                )
+                self.client = None
+                return None
             raise
 
     @staticmethod
     def _is_missing_schema_error(error: Exception) -> bool:
         if APIError is not None and not isinstance(error, APIError):
             return False
-        return "PGRST205" in str(error)
+        return any(code in str(error) for code in ("PGRST204", "PGRST205"))
 
     @staticmethod
     def _is_connection_error(error: Exception) -> bool:
         if TransportError is not None and isinstance(error, TransportError):
             return True
         return isinstance(error, OSError)
+
+    @staticmethod
+    def _is_api_error(error: Exception) -> bool:
+        return APIError is not None and isinstance(error, APIError)
+
+    def _add_local_favorite(
+        self,
+        user_id: int,
+        request_id: int | None,
+        title: str,
+        recipe_text: str,
+        child_note: str | None,
+    ) -> bool:
+        try:
+            favorites = self._read_local_favorites()
+            favorites.append(
+                {
+                    "user_id": user_id,
+                    "food_request_id": request_id,
+                    "title": title,
+                    "recipe": recipe_text,
+                    "child_note": child_note,
+                    "created_at": self._now(),
+                }
+            )
+            self.local_favorites_path.parent.mkdir(parents=True, exist_ok=True)
+            self.local_favorites_path.write_text(
+                json.dumps(favorites, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to save favorite to local fallback storage")
+            return False
+
+    def _list_local_favorites(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+        favorites = [
+            item
+            for item in self._read_local_favorites()
+            if item.get("user_id") == user_id
+        ]
+        return sorted(
+            favorites,
+            key=lambda item: item.get("created_at") or "",
+            reverse=True,
+        )[:limit]
+
+    def _read_local_favorites(self) -> list[dict[str, Any]]:
+        if not self.local_favorites_path.exists():
+            return []
+        try:
+            data = json.loads(self.local_favorites_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.exception("Failed to read local favorites")
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
 
     @staticmethod
     def recipe_to_text(recipe: Recipe) -> str:

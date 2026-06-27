@@ -16,10 +16,14 @@ def options_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def recipe_keyboard() -> InlineKeyboardMarkup:
+def recipe_keyboard(request_id: int | None = None) -> InlineKeyboardMarkup:
+    favorite_callback = "favorite:add"
+    if request_id is not None:
+        favorite_callback = f"favorite:add:{request_id}"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="В избранное", callback_data="favorite:add")],
+            [InlineKeyboardButton(text="В избранное", callback_data=favorite_callback)],
             [InlineKeyboardButton(text="Мои любимые рецепты", callback_data="favorites:list")],
             [InlineKeyboardButton(text="Еще варианты", callback_data="again")],
             [InlineKeyboardButton(text="Новый запрос", callback_data="new")],
