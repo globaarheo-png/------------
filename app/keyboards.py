@@ -20,6 +20,7 @@ def recipe_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="В избранное", callback_data="favorite:add")],
+            [InlineKeyboardButton(text="Мои любимые рецепты", callback_data="favorites:list")],
             [InlineKeyboardButton(text="Еще варианты", callback_data="again")],
             [InlineKeyboardButton(text="Новый запрос", callback_data="new")],
         ]

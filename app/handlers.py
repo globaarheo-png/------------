@@ -154,16 +154,7 @@ async def again_command(message: Message, storage: SupabaseStorage, gigachat: Gi
 async def favorites_command(message: Message, storage: SupabaseStorage) -> None:
     if not message.from_user:
         return
-    favorites = await storage.list_favorites(message.from_user.id)
-    if not favorites:
-        await message.answer("В избранном пока пусто.")
-        return
-
-    parts = ["<b>Избранные рецепты:</b>"]
-    for index, item in enumerate(favorites, start=1):
-        parts.append(f"\n<b>{index}. {escape(item.get('title') or 'Рецепт')}</b>")
-        parts.append(escape((item.get("recipe") or "").strip()[:900]))
-    await message.answer("\n".join(parts))
+    await send_favorites(message, message.from_user.id, storage)
 
 
 @router.message(Command("history"))
@@ -208,6 +199,13 @@ async def favorite_callback(callback: CallbackQuery, storage: SupabaseStorage) -
         return
     await storage.add_favorite(user_id, session.current_request_id, session.current_recipe)
     await callback.answer("Сохранила в избранное")
+
+
+@router.callback_query(F.data == "favorites:list")
+async def favorites_callback(callback: CallbackQuery, storage: SupabaseStorage) -> None:
+    if callback.message:
+        await send_favorites(callback.message, callback.from_user.id, storage)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("pick:"))
@@ -266,6 +264,19 @@ async def send_again(
         await message.answer(NO_LAST_REQUEST_TEXT)
         return
     await generate_and_send_options(message, user_id, session.last_query, storage, gigachat)
+
+
+async def send_favorites(message: Message, user_id: int, storage: SupabaseStorage) -> None:
+    favorites = await storage.list_favorites(user_id)
+    if not favorites:
+        await message.answer("В избранном пока пусто.")
+        return
+
+    parts = ["<b>Избранные рецепты:</b>"]
+    for index, item in enumerate(favorites, start=1):
+        parts.append(f"\n<b>{index}. {escape(item.get('title') or 'Рецепт')}</b>")
+        parts.append(escape((item.get("recipe") or "").strip()[:900]))
+    await message.answer("\n".join(parts))
 
 
 async def generate_and_send_options(
