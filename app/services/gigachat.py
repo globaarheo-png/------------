@@ -14,6 +14,7 @@ from app.models import DishOption, FamilySettings, Recipe
 
 logger = logging.getLogger(__name__)
 GIGACHAT_AUTH_KEY_ENV = "GIGACHAT_AUTH_KEY"
+GIGACHAT_SCOPE = "GIGACHAT_API_PERS"
 
 
 class GigaChatError(RuntimeError):
@@ -95,27 +96,59 @@ class GigaChatClient:
             logger.error("%s is not configured in environment variables", GIGACHAT_AUTH_KEY_ENV)
             raise GigaChatError("GigaChat credentials are not configured")
 
-        token = await self._access_token()
         request = {
             "model": self.settings.gigachat_model,
             "messages": messages,
             "temperature": temperature,
         }
+        logger.info(
+            "GigaChat chat request config: endpoint=%s model=%s",
+            self.chat_url,
+            self.settings.gigachat_model,
+        )
         async with httpx.AsyncClient(verify=self.settings.gigachat_verify_ssl, timeout=60) as client:
-            response = await client.post(
-                self.chat_url,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json=request,
-            )
+            token = await self._access_token()
+            response = await self._post_chat_completion(client, request, token)
+            if response.status_code == 401:
+                logger.warning(
+                    "GigaChat chat completion returned 401: endpoint=%s model=%s. "
+                    "Resetting cached access token and retrying once.",
+                    self.chat_url,
+                    self.settings.gigachat_model,
+                )
+                self._token = None
+                token = await self._access_token()
+                response = await self._post_chat_completion(client, request, token)
             self._raise_for_status(response, "GigaChat chat completion request")
             data = response.json()
 
         return str(data["choices"][0]["message"]["content"])
 
+    async def _post_chat_completion(
+        self,
+        client: httpx.AsyncClient,
+        request: dict[str, Any],
+        access_token: str,
+    ) -> httpx.Response:
+        return await client.post(
+            self.chat_url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=request,
+        )
+
     async def _access_token(self) -> str:
         if self._token:
             return self._token
 
+        scope = self._oauth_scope()
+        logger.info(
+            "GigaChat OAuth request config: endpoint=%s scope=%s",
+            self.auth_url,
+            scope,
+        )
         async with httpx.AsyncClient(verify=self.settings.gigachat_verify_ssl, timeout=30) as client:
             response = await client.post(
                 self.auth_url,
@@ -124,10 +157,15 @@ class GigaChatClient:
                     "RqUID": str(uuid.uuid4()),
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
-                data={"scope": self.settings.gigachat_scope},
+                data={"scope": scope},
             )
             self._raise_for_status(response, "GigaChat auth request")
-            self._token = response.json()["access_token"]
+            token = response.json().get("access_token")
+            if not isinstance(token, str) or not token.strip():
+                logger.error("GigaChat OAuth response did not include an access token")
+                raise GigaChatError("GigaChat authorization failed")
+            self._token = token.strip()
+            logger.info("GigaChat access token received: received=%s", True)
             return self._token
 
     @staticmethod
@@ -148,22 +186,21 @@ class GigaChatClient:
                 raise GigaChatError("GigaChat authorization failed") from exc
 
             logger.exception(
-                "%s failed: status=%s url=%s response_body=%r",
+                "%s failed: status=%s url=%s",
                 context,
                 response.status_code,
                 response.url,
-                response.text[:2000],
             )
             raise GigaChatError(f"{context} failed with HTTP {response.status_code}") from exc
 
     def _log_auth_key_check(self) -> None:
         auth_key = self.settings.gigachat_auth_key.strip()
         logger.info(
-            "GigaChat auth config: variable=%s found=%s length_gt_20=%s scope=%s",
+            "GigaChat auth config: variable=%s found=%s configured_scope=%s effective_scope=%s",
             GIGACHAT_AUTH_KEY_ENV,
             bool(auth_key),
-            len(auth_key) > 20,
             self.settings.gigachat_scope,
+            self._oauth_scope(),
         )
 
     @staticmethod
@@ -172,6 +209,16 @@ class GigaChatClient:
         if auth_key.lower().startswith("basic "):
             return auth_key
         return f"Basic {auth_key}"
+
+    def _oauth_scope(self) -> str:
+        configured_scope = self.settings.gigachat_scope.strip()
+        if configured_scope and configured_scope != GIGACHAT_SCOPE:
+            logger.warning(
+                "Ignoring configured GigaChat scope %s; using required scope %s",
+                configured_scope,
+                GIGACHAT_SCOPE,
+            )
+        return GIGACHAT_SCOPE
 
     @classmethod
     def _parse_json(cls, content: str) -> dict[str, Any]:
