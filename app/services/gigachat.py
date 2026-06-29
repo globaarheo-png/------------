@@ -18,6 +18,19 @@ GIGACHAT_SCOPE = "GIGACHAT_API_PERS"
 GIGACHAT_DEFAULT_MODEL = "GigaChat"
 
 
+def _clean_json_text(content: str) -> str:
+    cleaned = content.strip().lstrip("\ufeff")
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _repair_json_text(content: str) -> str:
+    repaired = _clean_json_text(content)
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    return repaired.strip()
+
+
 class GigaChatError(RuntimeError):
     pass
 
@@ -69,10 +82,16 @@ class GigaChatClient:
         )
 
         try:
-            return self._parse_json(content)
+            parsed = self._parse_json(content)
         except GigaChatError:
+            logger.info("GigaChat json parse failed: yes")
             logger.warning("GigaChat returned non-JSON content: %r", content[:1000])
+        else:
+            logger.info("GigaChat json parse failed: no")
+            logger.info("GigaChat retry after invalid json: no")
+            return parsed
 
+        logger.info("GigaChat retry after invalid json: yes")
         repaired = await self._chat_text(
             [
                 {
@@ -90,7 +109,14 @@ class GigaChatClient:
             ],
             temperature=0.0,
         )
-        return self._parse_json(repaired)
+        try:
+            parsed = self._parse_json(repaired)
+        except GigaChatError:
+            logger.info("GigaChat json parse failed: yes")
+            logger.info("GigaChat retry after invalid json: no")
+            raise
+        logger.info("GigaChat json parse failed: no")
+        return parsed
 
     async def _chat_text(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
         if not self.settings.gigachat_auth_key:
@@ -111,17 +137,33 @@ class GigaChatClient:
             token = await self._access_token()
             response = await self._post_chat_completion(client, request, token)
             logger.info("GigaChat chat status code: %s", response.status_code)
-            if response.status_code == 401:
+            token_expired = self._is_token_expired_response(response)
+            logger.info("GigaChat token expired detected: %s", self._yes_no(token_expired))
+            if token_expired:
                 logger.warning(
-                    "GigaChat chat completion returned 401: endpoint=%s model=%s. "
+                    "GigaChat chat completion token expired: endpoint=%s model=%s. "
                     "Resetting cached access token and retrying once.",
                     self.chat_url,
                     request["model"],
                 )
                 self._token = None
-                token = await self._access_token()
+                logger.info("GigaChat retry after token refresh: yes")
+                try:
+                    token = await self._access_token()
+                except Exception:
+                    logger.info("GigaChat access token refreshed: no")
+                    raise
+                else:
+                    logger.info("GigaChat access token refreshed: yes")
                 response = await self._post_chat_completion(client, request, token)
                 logger.info("GigaChat chat status code: %s", response.status_code)
+                logger.info(
+                    "GigaChat token expired detected: %s",
+                    self._yes_no(self._is_token_expired_response(response)),
+                )
+            else:
+                logger.info("GigaChat access token refreshed: no")
+                logger.info("GigaChat retry after token refresh: no")
             self._raise_for_status(response, "GigaChat chat completion request")
             data = response.json()
 
@@ -266,6 +308,12 @@ class GigaChatClient:
     def _yes_no(value: bool) -> str:
         return "yes" if value else "no"
 
+    @staticmethod
+    def _is_token_expired_response(response: httpx.Response) -> bool:
+        if response.status_code == 401:
+            return True
+        return "token has expired" in response.text.lower()
+
     @classmethod
     def _parse_json(cls, content: str) -> dict[str, Any]:
         candidates = cls._json_candidates(content)
@@ -280,16 +328,18 @@ class GigaChatClient:
 
     @staticmethod
     def _json_candidates(content: str) -> list[str]:
-        cleaned = content.strip()
+        cleaned = _clean_json_text(content)
         candidates = [cleaned]
 
         fenced_blocks = re.findall(r"```(?:json)?\s*(.*?)```", cleaned, flags=re.IGNORECASE | re.DOTALL)
-        candidates.extend(block.strip() for block in fenced_blocks)
+        candidates.extend(_clean_json_text(block) for block in fenced_blocks)
 
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start != -1 and end != -1 and end > start:
-            candidates.append(cleaned[start : end + 1])
+            candidates.append(_clean_json_text(cleaned[start : end + 1]))
+
+        candidates.extend(_repair_json_text(candidate) for candidate in list(candidates))
 
         # Preserve order, drop duplicates and empty strings.
         unique: list[str] = []
