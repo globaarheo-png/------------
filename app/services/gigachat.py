@@ -15,6 +15,7 @@ from app.models import DishOption, FamilySettings, Recipe
 logger = logging.getLogger(__name__)
 GIGACHAT_AUTH_KEY_ENV = "GIGACHAT_AUTH_KEY"
 GIGACHAT_SCOPE = "GIGACHAT_API_PERS"
+GIGACHAT_DEFAULT_MODEL = "GigaChat"
 
 
 class GigaChatError(RuntimeError):
@@ -97,28 +98,30 @@ class GigaChatClient:
             raise GigaChatError("GigaChat credentials are not configured")
 
         request = {
-            "model": self.settings.gigachat_model,
+            "model": self._chat_model(),
             "messages": messages,
             "temperature": temperature,
         }
         logger.info(
             "GigaChat chat request config: endpoint=%s model=%s",
             self.chat_url,
-            self.settings.gigachat_model,
+            request["model"],
         )
         async with httpx.AsyncClient(verify=self.settings.gigachat_verify_ssl, timeout=60) as client:
             token = await self._access_token()
             response = await self._post_chat_completion(client, request, token)
+            logger.info("GigaChat chat status code: %s", response.status_code)
             if response.status_code == 401:
                 logger.warning(
                     "GigaChat chat completion returned 401: endpoint=%s model=%s. "
                     "Resetting cached access token and retrying once.",
                     self.chat_url,
-                    self.settings.gigachat_model,
+                    request["model"],
                 )
                 self._token = None
                 token = await self._access_token()
                 response = await self._post_chat_completion(client, request, token)
+                logger.info("GigaChat chat status code: %s", response.status_code)
             self._raise_for_status(response, "GigaChat chat completion request")
             data = response.json()
 
@@ -130,10 +133,26 @@ class GigaChatClient:
         request: dict[str, Any],
         access_token: str,
     ) -> httpx.Response:
+        token = access_token.strip()
+        if not token:
+            logger.error("GigaChat access token is empty before chat request")
+            raise GigaChatError("GigaChat authorization failed")
+
+        authorization = self._chat_authorization_header(token)
+        logger.info(
+            "GigaChat chat Authorization header starts with Bearer: %s",
+            self._yes_no(authorization.startswith("Bearer ")),
+        )
+        logger.info(
+            "GigaChat chat Authorization header uses Authorization Key: %s",
+            self._yes_no(
+                authorization == self._oauth_authorization_header(self.settings.gigachat_auth_key)
+            ),
+        )
         return await client.post(
             self.chat_url,
             headers={
-                "Authorization": f"Bearer {access_token}",
+                "Authorization": authorization,
                 "Content-Type": "application/json",
             },
             json=request,
@@ -144,6 +163,7 @@ class GigaChatClient:
             return self._token
 
         scope = self._oauth_scope()
+        auth_key = self.settings.gigachat_auth_key.strip()
         logger.info(
             "GigaChat OAuth request config: endpoint=%s scope=%s",
             self.auth_url,
@@ -153,19 +173,22 @@ class GigaChatClient:
             response = await client.post(
                 self.auth_url,
                 headers={
-                    "Authorization": self._authorization_header(self.settings.gigachat_auth_key),
+                    "Authorization": self._oauth_authorization_header(auth_key),
                     "RqUID": str(uuid.uuid4()),
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
                 data={"scope": scope},
             )
+            logger.info("GigaChat OAuth status code: %s", response.status_code)
             self._raise_for_status(response, "GigaChat auth request")
             token = response.json().get("access_token")
+            token_received = isinstance(token, str) and bool(token.strip())
+            logger.info("GigaChat access_token received: %s", self._yes_no(token_received))
             if not isinstance(token, str) or not token.strip():
                 logger.error("GigaChat OAuth response did not include an access token")
                 raise GigaChatError("GigaChat authorization failed")
             self._token = token.strip()
-            logger.info("GigaChat access token received: received=%s", True)
+            logger.info("GigaChat access_token length: %s", len(self._token))
             return self._token
 
     @staticmethod
@@ -196,19 +219,28 @@ class GigaChatClient:
     def _log_auth_key_check(self) -> None:
         auth_key = self.settings.gigachat_auth_key.strip()
         logger.info(
-            "GigaChat auth config: variable=%s found=%s configured_scope=%s effective_scope=%s",
+            "GigaChat env variable exists: %s",
+            self._yes_no(bool(auth_key)),
+        )
+        logger.info("GigaChat Authorization key length: %s", len(auth_key))
+        logger.info(
+            "GigaChat auth config: variable=%s configured_scope=%s effective_scope=%s model=%s",
             GIGACHAT_AUTH_KEY_ENV,
-            bool(auth_key),
             self.settings.gigachat_scope,
             self._oauth_scope(),
+            self._chat_model(),
         )
 
     @staticmethod
-    def _authorization_header(auth_key: str) -> str:
+    def _oauth_authorization_header(auth_key: str) -> str:
         auth_key = auth_key.strip()
         if auth_key.lower().startswith("basic "):
             return auth_key
         return f"Basic {auth_key}"
+
+    @staticmethod
+    def _chat_authorization_header(access_token: str) -> str:
+        return f"Bearer {access_token.strip()}"
 
     def _oauth_scope(self) -> str:
         configured_scope = self.settings.gigachat_scope.strip()
@@ -219,6 +251,20 @@ class GigaChatClient:
                 GIGACHAT_SCOPE,
             )
         return GIGACHAT_SCOPE
+
+    def _chat_model(self) -> str:
+        model = self.settings.gigachat_model.strip()
+        if not model:
+            logger.warning(
+                "GigaChat model is empty; using default model %s",
+                GIGACHAT_DEFAULT_MODEL,
+            )
+            return GIGACHAT_DEFAULT_MODEL
+        return model
+
+    @staticmethod
+    def _yes_no(value: bool) -> str:
+        return "yes" if value else "no"
 
     @classmethod
     def _parse_json(cls, content: str) -> dict[str, Any]:
